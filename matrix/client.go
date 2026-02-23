@@ -62,11 +62,20 @@ func formatEvent(ev feed.Event) (plain, htmlBody string) {
 		plainBuf.WriteString(ev.Title)
 	}
 
-	// Date
+	// Date (with optional end time for iCal events)
 	if !ev.Date.IsZero() {
-		dateStr := ev.Date.Format("Mon, 02 Jan 2006 15:04 MST")
-		htmlBuf.WriteString(fmt.Sprintf("<br/><b>Date:</b> %s", html.EscapeString(dateStr)))
-		plainBuf.WriteString(fmt.Sprintf("\nDate: %s", dateStr))
+		dateStr := ev.Date.Format("Mon, 02 Jan 2006 3:04 PM")
+		if !ev.DateEnd.IsZero() && ev.DateEnd.After(ev.Date) {
+			if ev.Date.Format("2006-01-02") == ev.DateEnd.Format("2006-01-02") {
+				// Same day: show "Mon, 02 Jan 2006 3:04 PM - 5:04 PM"
+				dateStr += " - " + ev.DateEnd.Format("3:04 PM")
+			} else {
+				// Different days: show full range
+				dateStr += " - " + ev.DateEnd.Format("Mon, 02 Jan 2006 3:04 PM")
+			}
+		}
+		htmlBuf.WriteString(fmt.Sprintf("<br/><b>When:</b> %s", html.EscapeString(dateStr)))
+		plainBuf.WriteString(fmt.Sprintf("\nWhen: %s", dateStr))
 	}
 
 	// Location

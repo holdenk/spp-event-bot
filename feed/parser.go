@@ -1,8 +1,8 @@
-// Package feed handles fetching and parsing RSS 2.0 and Atom XML event feeds.
+// Package feed handles fetching and parsing iCal (.ics) event feeds.
 package feed
 
 import (
-	"encoding/xml"
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,85 +10,30 @@ import (
 	"time"
 )
 
-// Event represents a single event parsed from a feed.
+// Event represents a single event parsed from an iCal feed.
 type Event struct {
 	Title       string
 	Description string
 	Link        string
 	Date        time.Time
+	DateEnd     time.Time
 	Location    string
 	GUID        string
 }
 
-// --- RSS 2.0 structures ---
-
-type rssRoot struct {
-	XMLName xml.Name   `xml:"rss"`
-	Channel rssChannel `xml:"channel"`
-}
-
-type rssChannel struct {
-	Items []rssItem `xml:"item"`
-}
-
-type rssItem struct {
-	Title       string `xml:"title"`
-	Description string `xml:"description"`
-	Link        string `xml:"link"`
-	PubDate     string `xml:"pubDate"`
-	GUID        string `xml:"guid"`
-	// Some feeds use <location>, <ev:location>, or <georss:featureName> for location.
-	Location string `xml:"location"`
-}
-
-// --- Atom structures ---
-
-type atomFeed struct {
-	XMLName xml.Name    `xml:"feed"`
-	Entries []atomEntry `xml:"entry"`
-}
-
-type atomEntry struct {
-	Title   string     `xml:"title"`
-	Summary string     `xml:"summary"`
-	Content string     `xml:"content"`
-	Links   []atomLink `xml:"link"`
-	Updated string     `xml:"updated"`
-	ID      string     `xml:"id"`
-	// Atom doesn't have a standard location field; try <georss:featureName>.
-	Location string `xml:"featureName"`
-}
-
-type atomLink struct {
-	Href string `xml:"href,attr"`
-	Rel  string `xml:"rel,attr"`
-}
-
-// Parse parses raw XML data as either an RSS 2.0 or Atom feed and returns events.
+// Parse parses raw iCal data and returns events.
 func Parse(data []byte) ([]Event, error) {
-	// Try RSS 2.0 first.
-	events, err := parseRSS(data)
-	if err == nil {
-		return events, nil
-	}
-
-	// Try Atom.
-	events, err = parseAtom(data)
-	if err == nil {
-		return events, nil
-	}
-
-	return nil, fmt.Errorf("failed to parse feed as RSS 2.0 or Atom: %w", err)
+	return parseICal(string(data))
 }
 
-// FetchAndParse fetches a feed from the given URL via HTTP GET and parses it.
+// FetchAndParse fetches an iCal feed from the given URL via HTTP GET and parses it.
 func FetchAndParse(url string) ([]Event, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("User-Agent", "spp-event-bot/1.0")
-	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml")
+	req.Header.Set("Accept", "text/calendar, application/ics, text/plain")
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -109,116 +54,136 @@ func FetchAndParse(url string) ([]Event, error) {
 	return Parse(body)
 }
 
-func parseRSS(data []byte) ([]Event, error) {
-	var rss rssRoot
-	if err := xml.Unmarshal(data, &rss); err != nil {
-		return nil, err
-	}
+// parseICal parses iCalendar format text into events.
+// Extracts VEVENT components with SUMMARY, DESCRIPTION, DTSTART, DTEND,
+// LOCATION, URL, and UID properties.
+func parseICal(data string) ([]Event, error) {
+	// Unfold lines per RFC 5545: lines starting with a space or tab are
+	// continuations of the previous line.
+	data = unfoldLines(data)
 
-	events := make([]Event, 0, len(rss.Channel.Items))
-	for _, item := range rss.Channel.Items {
-		date := parseDate(item.PubDate)
+	scanner := bufio.NewScanner(strings.NewReader(data))
+	var events []Event
+	var current *Event
+	inEvent := false
 
-		guid := item.GUID
-		if guid == "" {
-			guid = item.Link
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+
+		if line == "BEGIN:VEVENT" {
+			inEvent = true
+			current = &Event{}
+			continue
 		}
 
-		events = append(events, Event{
-			Title:       strings.TrimSpace(item.Title),
-			Description: strings.TrimSpace(stripHTML(item.Description)),
-			Link:        strings.TrimSpace(item.Link),
-			Date:        date,
-			Location:    strings.TrimSpace(item.Location),
-			GUID:        guid,
-		})
-	}
-
-	return events, nil
-}
-
-func parseAtom(data []byte) ([]Event, error) {
-	var atom atomFeed
-	if err := xml.Unmarshal(data, &atom); err != nil {
-		return nil, err
-	}
-
-	events := make([]Event, 0, len(atom.Entries))
-	for _, entry := range atom.Entries {
-		date := parseDate(entry.Updated)
-
-		// Prefer the alternate link; fall back to the first link.
-		link := ""
-		for _, l := range entry.Links {
-			if l.Rel == "alternate" || l.Rel == "" {
-				link = l.Href
-				break
+		if line == "END:VEVENT" && inEvent {
+			inEvent = false
+			if current.Title != "" || current.GUID != "" {
+				events = append(events, *current)
 			}
-		}
-		if link == "" && len(entry.Links) > 0 {
-			link = entry.Links[0].Href
-		}
-
-		description := entry.Summary
-		if description == "" {
-			description = entry.Content
+			current = nil
+			continue
 		}
 
-		events = append(events, Event{
-			Title:       strings.TrimSpace(entry.Title),
-			Description: strings.TrimSpace(stripHTML(description)),
-			Link:        strings.TrimSpace(link),
-			Date:        date,
-			Location:    strings.TrimSpace(entry.Location),
-			GUID:        entry.ID,
-		})
+		if !inEvent || current == nil {
+			continue
+		}
+
+		// Parse property:value pairs. Properties may have parameters
+		// (e.g., DTSTART;VALUE=DATE:20260215).
+		key, value := splitProperty(line)
+
+		// Strip parameters from key (e.g., "DTSTART;VALUE=DATE" -> "DTSTART").
+		baseKey := key
+		if idx := strings.IndexByte(key, ';'); idx >= 0 {
+			baseKey = key[:idx]
+		}
+
+		switch baseKey {
+		case "SUMMARY":
+			current.Title = unescapeICal(value)
+		case "DESCRIPTION":
+			current.Description = unescapeICal(value)
+		case "LOCATION":
+			current.Location = unescapeICal(value)
+		case "URL":
+			current.Link = value
+		case "UID":
+			current.GUID = value
+		case "DTSTART":
+			current.Date = parseICalDate(value)
+		case "DTEND":
+			current.DateEnd = parseICalDate(value)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading ical data: %w", err)
 	}
 
 	return events, nil
 }
 
-// parseDate attempts to parse a date string in several common feed formats.
-func parseDate(raw string) time.Time {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+// splitProperty splits an iCal line into property name (with any parameters) and value.
+// Example: "DTSTART;VALUE=DATE:20260215" -> ("DTSTART;VALUE=DATE", "20260215")
+func splitProperty(line string) (string, string) {
+	idx := strings.IndexByte(line, ':')
+	if idx < 0 {
+		return line, ""
+	}
+	return line[:idx], line[idx+1:]
+}
+
+// unfoldLines handles RFC 5545 line folding: lines that start with a space
+// or horizontal tab are continuations of the previous line.
+func unfoldLines(s string) string {
+	var b strings.Builder
+	lines := strings.Split(s, "\n")
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			// Continuation: append without the leading whitespace.
+			b.WriteString(line[1:])
+		} else {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}
+
+// unescapeICal unescapes iCal text values per RFC 5545.
+// Handles: \n -> newline, \, -> comma, \; -> semicolon, \\ -> backslash.
+func unescapeICal(s string) string {
+	s = strings.ReplaceAll(s, "\\n", "\n")
+	s = strings.ReplaceAll(s, "\\N", "\n")
+	s = strings.ReplaceAll(s, "\\,", ",")
+	s = strings.ReplaceAll(s, "\\;", ";")
+	s = strings.ReplaceAll(s, "\\\\", "\\")
+	return strings.TrimSpace(s)
+}
+
+// parseICalDate parses an iCal date or datetime value.
+// Supports: 20260215T080000Z, 20260215T080000, 20260215, with optional TZID.
+func parseICalDate(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
 		return time.Time{}
 	}
 
 	formats := []string{
-		time.RFC1123Z,                // RSS standard: Mon, 02 Jan 2006 15:04:05 -0700
-		time.RFC1123,                 // Mon, 02 Jan 2006 15:04:05 MST
-		time.RFC3339,                 // Atom standard: 2006-01-02T15:04:05Z07:00
-		"2006-01-02T15:04:05Z",      // Atom without offset
-		"2006-01-02T15:04:05-07:00", // Atom variant
-		"2006-01-02 15:04:05",       // Common format
-		"2006-01-02",                // Date only
-		"Mon, 2 Jan 2006 15:04:05 -0700",
-		"Mon, 2 Jan 2006 15:04:05 MST",
-		"02 Jan 2006 15:04:05 -0700",
+		"20060102T150405Z",  // UTC datetime
+		"20060102T150405",   // Local datetime
+		"20060102",          // Date only
 	}
 
 	for _, f := range formats {
-		if t, err := time.Parse(f, raw); err == nil {
+		if t, err := time.Parse(f, s); err == nil {
 			return t
 		}
 	}
 
 	return time.Time{}
-}
-
-// stripHTML removes HTML tags from a string for plain-text display.
-func stripHTML(s string) string {
-	var b strings.Builder
-	inTag := false
-	for _, r := range s {
-		switch {
-		case r == '<':
-			inTag = true
-		case r == '>':
-			inTag = false
-		case !inTag:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
