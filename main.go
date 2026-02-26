@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -98,7 +99,7 @@ func pollLoop(ctx context.Context, cfg *config.Config, mxClient *matrix.Client, 
 func poll(ctx context.Context, cfg *config.Config, mxClient *matrix.Client, lastSeen *time.Time) {
 	slog.Info("polling feed", "url", cfg.FeedURL)
 
-	events, err := feed.FetchAndParse(cfg.FeedURL)
+	events, err := feed.FetchAndParse(ctx, cfg.FeedURL)
 	if err != nil {
 		slog.Error("failed to fetch/parse feed", "error", err)
 		return
@@ -109,12 +110,8 @@ func poll(ctx context.Context, cfg *config.Config, mxClient *matrix.Client, last
 	// Filter to only new events (those with a date after lastSeen).
 	var newEvents []feed.Event
 	for _, ev := range events {
-		// If the event has no date, we use GUID-based dedup only.
+		// Skip undated events — we can only do date-based filtering.
 		if ev.Date.IsZero() {
-			// For undated events, include them only on the first run (lastSeen is zero).
-			if lastSeen.IsZero() {
-				continue // Skip undated events on initial run to avoid spamming.
-			}
 			continue
 		}
 		if ev.Date.After(*lastSeen) {
@@ -128,6 +125,11 @@ func poll(ctx context.Context, cfg *config.Config, mxClient *matrix.Client, last
 	}
 
 	slog.Info("found new events", "count", len(newEvents))
+
+	// Sort events oldest-first.
+	sort.Slice(newEvents, func(i, j int) bool {
+		return newEvents[i].Date.Before(newEvents[j].Date)
+	})
 
 	// Post new events oldest-first.
 	latestDate := *lastSeen

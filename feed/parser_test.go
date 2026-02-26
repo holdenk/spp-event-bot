@@ -1,6 +1,7 @@
 package feed
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -156,7 +157,7 @@ func TestParseICalDateFormats(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := parseICalDate(tt.input)
+		got := parseICalDate(tt.input, "")
 		if tt.want == "" {
 			if !got.IsZero() {
 				t.Errorf("parseICalDate(%q) = %v, want zero", tt.input, got)
@@ -208,7 +209,7 @@ func TestFetchAndParse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	events, err := FetchAndParse(server.URL)
+	events, err := FetchAndParse(context.Background(), server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -223,7 +224,7 @@ func TestFetchAndParseHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := FetchAndParse(server.URL)
+	_, err := FetchAndParse(context.Background(), server.URL)
 	if err == nil {
 		t.Error("expected error for HTTP 500, got nil")
 	}
@@ -286,5 +287,54 @@ END:VCALENDAR`
 		if events[i].Title != want {
 			t.Errorf("events[%d].Title = %q, want %q", i, events[i].Title, want)
 		}
+	}
+}
+
+func TestUnescapeICalBackslash(t *testing.T) {
+	// Input "\\n" is literal backslash + n in iCal. It should unescape to
+	// a single backslash followed by 'n', NOT a newline.
+	got := unescapeICal(`\\n`)
+	want := `\n`
+	if got != want {
+		t.Errorf("unescapeICal(%q) = %q, want %q", `\\n`, got, want)
+	}
+
+	// Input "\\," should become "\,"
+	got2 := unescapeICal(`\\,`)
+	want2 := `\,`
+	if got2 != want2 {
+		t.Errorf("unescapeICal(%q) = %q, want %q", `\\,`, got2, want2)
+	}
+}
+
+func TestParseICalTZID(t *testing.T) {
+	ical := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:tz-test@example.com
+DTSTART;TZID=America/New_York:20260215T160000
+DTEND;TZID=America/New_York:20260215T190000
+SUMMARY:East Coast Ride
+END:VEVENT
+END:VCALENDAR`
+
+	events, err := Parse([]byte(ical))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	ev := events[0]
+	// 4pm Eastern = 9pm UTC (EST is UTC-5)
+	wantUTC := time.Date(2026, 2, 15, 21, 0, 0, 0, time.UTC)
+	if !ev.Date.UTC().Equal(wantUTC) {
+		t.Errorf("date = %v (UTC: %v), want %v UTC", ev.Date, ev.Date.UTC(), wantUTC)
+	}
+	// 7pm Eastern = midnight UTC
+	wantEndUTC := time.Date(2026, 2, 16, 0, 0, 0, 0, time.UTC)
+	if !ev.DateEnd.UTC().Equal(wantEndUTC) {
+		t.Errorf("dateEnd = %v (UTC: %v), want %v UTC", ev.DateEnd, ev.DateEnd.UTC(), wantEndUTC)
 	}
 }

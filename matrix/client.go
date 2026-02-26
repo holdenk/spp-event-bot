@@ -84,11 +84,12 @@ func formatEvent(ev feed.Event) (plain, htmlBody string) {
 		plainBuf.WriteString(fmt.Sprintf("\nLocation: %s", ev.Location))
 	}
 
-	// Description snippet (truncate to 500 chars for readability)
+	// Description snippet (truncate to 500 runes for readability)
 	if ev.Description != "" {
 		desc := ev.Description
-		if len(desc) > 500 {
-			desc = desc[:497] + "..."
+		runes := []rune(desc)
+		if len(runes) > 500 {
+			desc = string(runes[:497]) + "..."
 		}
 		htmlBuf.WriteString(fmt.Sprintf("<br/><br/>%s", html.EscapeString(desc)))
 		plainBuf.WriteString(fmt.Sprintf("\n\n%s", desc))

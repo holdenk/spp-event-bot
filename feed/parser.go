@@ -3,6 +3,7 @@ package feed
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,8 +28,8 @@ func Parse(data []byte) ([]Event, error) {
 }
 
 // FetchAndParse fetches an iCal feed from the given URL via HTTP GET and parses it.
-func FetchAndParse(url string) ([]Event, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func FetchAndParse(ctx context.Context, url string) ([]Event, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -46,7 +47,7 @@ func FetchAndParse(url string) ([]Event, error) {
 		return nil, fmt.Errorf("feed returned HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("reading feed body: %w", err)
 	}
@@ -94,9 +95,17 @@ func parseICal(data string) ([]Event, error) {
 		key, value := splitProperty(line)
 
 		// Strip parameters from key (e.g., "DTSTART;VALUE=DATE" -> "DTSTART").
+		// Also extract TZID if present (e.g., "DTSTART;TZID=America/New_York").
 		baseKey := key
+		var tzid string
 		if idx := strings.IndexByte(key, ';'); idx >= 0 {
+			params := key[idx+1:]
 			baseKey = key[:idx]
+			for _, param := range strings.Split(params, ";") {
+				if strings.HasPrefix(param, "TZID=") {
+					tzid = param[5:]
+				}
+			}
 		}
 
 		switch baseKey {
@@ -111,9 +120,9 @@ func parseICal(data string) ([]Event, error) {
 		case "UID":
 			current.GUID = value
 		case "DTSTART":
-			current.Date = parseICalDate(value)
+			current.Date = parseICalDate(value, tzid)
 		case "DTEND":
-			current.DateEnd = parseICalDate(value)
+			current.DateEnd = parseICalDate(value, tzid)
 		}
 	}
 
@@ -155,33 +164,59 @@ func unfoldLines(s string) string {
 }
 
 // unescapeICal unescapes iCal text values per RFC 5545.
-// Handles: \n -> newline, \, -> comma, \; -> semicolon, \\ -> backslash.
+// Handles: \\ -> backslash, \n -> newline, \, -> comma, \; -> semicolon.
 func unescapeICal(s string) string {
+	// Replace \\\\ first using a placeholder to avoid double-replacement.
+	// e.g., input "\\n" should become "\n" (literal), not a newline.
+	s = strings.ReplaceAll(s, "\\\\", "\x00")
 	s = strings.ReplaceAll(s, "\\n", "\n")
 	s = strings.ReplaceAll(s, "\\N", "\n")
 	s = strings.ReplaceAll(s, "\\,", ",")
 	s = strings.ReplaceAll(s, "\\;", ";")
-	s = strings.ReplaceAll(s, "\\\\", "\\")
+	s = strings.ReplaceAll(s, "\x00", "\\")
 	return strings.TrimSpace(s)
 }
 
 // parseICalDate parses an iCal date or datetime value.
 // Supports: 20260215T080000Z, 20260215T080000, 20260215, with optional TZID.
-func parseICalDate(s string) time.Time {
+func parseICalDate(s string, tzid string) time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}
 	}
 
+	// If the value ends with Z, it's UTC regardless of any TZID.
+	if strings.HasSuffix(s, "Z") {
+		if t, err := time.Parse("20060102T150405Z", s); err == nil {
+			return t
+		}
+		return time.Time{}
+	}
+
+	// Load timezone if TZID was specified.
+	var loc *time.Location
+	if tzid != "" {
+		var err error
+		loc, err = time.LoadLocation(tzid)
+		if err != nil {
+			loc = nil // Fall back to UTC on invalid TZID.
+		}
+	}
+
 	formats := []string{
-		"20060102T150405Z",  // UTC datetime
-		"20060102T150405",   // Local datetime
-		"20060102",          // Date only
+		"20060102T150405", // Local datetime
+		"20060102",        // Date only
 	}
 
 	for _, f := range formats {
-		if t, err := time.Parse(f, s); err == nil {
-			return t
+		if loc != nil {
+			if t, err := time.ParseInLocation(f, s, loc); err == nil {
+				return t
+			}
+		} else {
+			if t, err := time.Parse(f, s); err == nil {
+				return t
+			}
 		}
 	}
 

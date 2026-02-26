@@ -6,13 +6,11 @@ RUN apk add --no-cache ca-certificates git
 WORKDIR /src
 
 # Cache dependency downloads.
-COPY go.mod ./
-COPY go.sum* ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 # Build the binary.
 COPY . .
-RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /spp-event-bot .
 
 # Runtime stage
