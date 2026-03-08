@@ -49,6 +49,60 @@ func (c *Client) PostEvent(ctx context.Context, roomID string, ev feed.Event) er
 	return nil
 }
 
+// PostReminder formats a day-of reminder for an event and sends it to the given Matrix room.
+func (c *Client) PostReminder(ctx context.Context, roomID string, ev feed.Event) error {
+	plain, formatted := formatReminder(ev)
+
+	content := &event.MessageEventContent{
+		MsgType:       event.MsgText,
+		Body:          plain,
+		Format:        event.FormatHTML,
+		FormattedBody: formatted,
+	}
+
+	_, err := c.mxClient.SendMessageEvent(ctx, id.RoomID(roomID), event.EventMessage, content)
+	if err != nil {
+		return fmt.Errorf("sending reminder to %s: %w", roomID, err)
+	}
+
+	return nil
+}
+
+// formatReminder builds plain-text and HTML representations of a day-of reminder.
+func formatReminder(ev feed.Event) (plain, htmlBody string) {
+	var plainBuf, htmlBuf strings.Builder
+
+	htmlBuf.WriteString("<b>Reminder: Today!</b> ")
+	plainBuf.WriteString("Reminder: Today! ")
+
+	// Title
+	if ev.Link != "" {
+		htmlBuf.WriteString(fmt.Sprintf("<b><a href=\"%s\">%s</a></b>", html.EscapeString(ev.Link), html.EscapeString(ev.Title)))
+		plainBuf.WriteString(fmt.Sprintf("%s (%s)", ev.Title, ev.Link))
+	} else {
+		htmlBuf.WriteString(fmt.Sprintf("<b>%s</b>", html.EscapeString(ev.Title)))
+		plainBuf.WriteString(ev.Title)
+	}
+
+	// Time
+	if !ev.Date.IsZero() {
+		timeStr := ev.Date.Format("3:04 PM")
+		if !ev.DateEnd.IsZero() && ev.DateEnd.After(ev.Date) {
+			timeStr += " - " + ev.DateEnd.Format("3:04 PM")
+		}
+		htmlBuf.WriteString(fmt.Sprintf("<br/><b>Time:</b> %s", html.EscapeString(timeStr)))
+		plainBuf.WriteString(fmt.Sprintf("\nTime: %s", timeStr))
+	}
+
+	// Location
+	if ev.Location != "" {
+		htmlBuf.WriteString(fmt.Sprintf("<br/><b>Location:</b> %s", html.EscapeString(ev.Location)))
+		plainBuf.WriteString(fmt.Sprintf("\nLocation: %s", ev.Location))
+	}
+
+	return plainBuf.String(), htmlBuf.String()
+}
+
 // formatEvent builds plain-text and HTML representations of a feed event.
 func formatEvent(ev feed.Event) (plain, htmlBody string) {
 	var plainBuf, htmlBuf strings.Builder

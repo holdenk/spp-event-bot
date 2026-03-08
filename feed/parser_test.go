@@ -205,7 +205,7 @@ func TestUnfoldLines(t *testing.T) {
 func TestFetchAndParse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/calendar")
-		w.Write([]byte(testICal))
+		_, _ = w.Write([]byte(testICal))
 	}))
 	defer server.Close()
 
