@@ -75,7 +75,9 @@ func TestSaveAndLoadState(t *testing.T) {
 func TestLoadStateCorruptJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, stateFile)
-	os.WriteFile(path, []byte("not valid json{"), 0o644)
+	if err := os.WriteFile(path, []byte("not valid json{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	state := loadState(dir)
 	if state == nil {
